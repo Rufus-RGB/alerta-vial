@@ -822,6 +822,8 @@ textarea.input-simple { height: 76px; padding: 10px 12px; resize: none; font-wei
 </div>
 </div>
 
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
 <script>
 (() => {
 'use strict';
@@ -949,6 +951,7 @@ const estadoInicial = () => ({
   borrador: null,
   vehiculos: [ { id:'v1', tipo:'moto', marca:'Yamaha', modelo:'2019', placa:'ABC12D', color:'azul', fotos: [], ejemplo:true } ],
   favoritas: ['kennedy'],
+  demo: false,
   utiles: ['c-hgt56y'],
   avistamientos: {},
   config: { hurto:true, aumento:true, cai:true, zonas:true, sonido:true, radio:'3' },
@@ -970,7 +973,74 @@ function guardar() {
 }
 
 const locPorId = id => LOCALIDADES.find(l => l.id === id) || LOCALIDADES[0];
-const todosReportes = () => [...S.misReportes.map(r => ({ ...r, mio: true })), ...S.vivos, ...COMUNIDAD];
+/* ================= Base de datos compartida (Supabase) =================
+   Con config.js lleno, los reportes se guardan en la nube y llegan en vivo a todos.
+   Sin configuración, la app funciona en modo local (cada navegador ve solo lo suyo). */
+const CFG = window.ALERTA_CONFIG || {};
+const NUBE = !!(CFG.supabaseUrl && CFG.supabaseKey && window.supabase);
+const sb = NUBE ? window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey) : null;
+let REMOTOS = [], miUid = null, nubeLista = false, nubeError = false;
+const deFila = f => ({
+  id: f.id, autor: f.autor, autorNombre: f.anonimo ? null : f.autor_nombre, tipo: f.tipo, marca: f.marca, ref: f.ref, modelo: f.modelo,
+  placa: f.placa, color: f.color, fotos: f.fotos || [], senas: f.senas, modo: f.modo, lugar: f.lugar, loc: f.loc, x: f.x, y: f.y,
+  t: Date.parse(f.t), estado: f.estado, recuperado: f.recuperado ? Date.parse(f.recuperado) : null,
+  editado: f.editado ? Date.parse(f.editado) : null, anonimo: f.anonimo, mio: f.autor === miUid, nube: true,
+});
+const aFila = d => ({
+  tipo: d.tipo, marca: d.marca, ref: d.ref || null, modelo: d.modelo, placa: d.placa, color: d.color, fotos: d.fotos || [],
+  senas: d.senas || null, modo: d.modo, lugar: d.lugar || null, loc: d.loc, x: d.x, y: d.y, t: new Date(d.t).toISOString(),
+  anonimo: !!d.anonimo, autor_nombre: d.anonimo ? null : (S.usuario.nombre || null),
+});
+function ponerRemoto(r) { const i = REMOTOS.findIndex(x => x.id === r.id); if (i >= 0) REMOTOS[i] = r; else REMOTOS.unshift(r); }
+async function conectarNube() {
+  if (!NUBE) return;
+  try {
+    let { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      const r = await sb.auth.signInAnonymously();
+      if (r.error) throw r.error;
+      session = r.data.session;
+    }
+    miUid = session.user.id;
+    await cargarRemotos();
+    sb.channel('reportes-en-vivo').on('postgres_changes', { event: '*', schema: 'public', table: 'reportes' }, cambioRemoto).subscribe();
+  } catch (e) {
+    console.error('Supabase:', e);
+    nubeError = true; nubeLista = true; pintarActual();
+    toast('No se pudo conectar con la base de datos. Revisa tu internet y vuelve a abrir la app.', 4500);
+  }
+}
+async function cargarRemotos() {
+  const desde = new Date(Date.now() - 30 * DIA).toISOString();
+  const [todos, mios] = await Promise.all([
+    sb.from('reportes').select('*').gte('t', desde).order('t', { ascending: false }).limit(500),
+    sb.from('reportes').select('*').eq('autor', miUid).lt('t', desde),
+  ]);
+  if (todos.error) throw todos.error;
+  REMOTOS = [...todos.data, ...(mios.data || [])].map(deFila);
+  nubeLista = true; nubeError = false; actualizadoEn = Date.now();
+  pintarActual();
+}
+function cambioRemoto(p) {
+  if (p.eventType === 'DELETE') REMOTOS = REMOTOS.filter(r => r.id !== p.old?.id);
+  else {
+    const r = deFila(p.new), nuevo = !REMOTOS.some(x => x.id === r.id);
+    ponerRemoto(r);
+    if (nuevo && !r.mio) {
+      ultimoNuevo = r.id; entraId = r.id;
+      if (S.config.hurto && actual !== 'reporte') {
+        const fav = S.favoritas.includes(r.loc) || r.loc === S.usuario.localidad;
+        toast(`Nuevo hurto${fav ? ' en tu zona' : ''}: ${TIPO_CORTO[r.tipo].toLowerCase()} color ${colorDe(r.color).n.toLowerCase()} en ${locPorId(r.loc).nombre}`, 3500);
+      }
+    }
+  }
+  actualizadoEn = Date.now();
+  if (['alertas', 'inicio', 'mapa', 'historial', 'perfil'].includes(actual) && sheet.hidden) pintarActual(); else pintarBadges();
+}
+// Los datos de ejemplo se muestran siempre en modo local; con la nube, solo si el usuario los activa
+const demoActivo = () => !NUBE || S.demo;
+const misReps = () => NUBE ? REMOTOS.filter(r => r.mio) : S.misReportes.map(r => ({ ...r, mio: true }));
+const todosReportes = () => NUBE ? [...REMOTOS, ...(S.demo ? [...S.vivos, ...COMUNIDAD] : [])] : [...misReps(), ...S.vivos, ...COMUNIDAD];
 const reportePorId = id => todosReportes().find(r => r.id === id);
 const conteo = (locId, v = S.ventana) => { const d = VENTANAS[v].desde(); return todosReportes().filter(r => r.loc === locId && r.t >= d).length; };
 function riesgo(locId, v = S.ventana) { const n = conteo(locId, v), [a, m] = VENTANAS[v].umbral; return n >= a ? 'alto' : n >= m ? 'medio' : 'bajo'; }
@@ -1484,6 +1554,12 @@ function pintarBadges() {
 let entraId = null, marcarVistoT;
 function pintarAlertas() {
   const top = todosReportes().sort((a, b) => b.t - a.t)[0];
+  if (!top) {
+    $('#alerta-destacada').innerHTML = `<img src="images/vector-127.svg" alt="">
+      <p>${NUBE && !nubeLista ? 'Cargando reportes…' : nubeError ? 'Sin conexión con la base de datos' : 'Aún no hay hurtos reportados'}</p>
+      <p class="loc">${nubeError ? 'Revisa tu internet y vuelve a abrir la app.' : 'Cuando alguien reporte un hurto aparecerá aquí al instante.'}</p>
+      <button class="btn-pill" data-go="reporte">Reportar un hurto</button>`;
+  } else {
   const l = locPorId(top.loc), rg = riesgo(top.loc, 'hoy');
   $('#alerta-destacada').innerHTML = `
     <img src="images/vector-127.svg" alt="">
@@ -1491,6 +1567,7 @@ function pintarAlertas() {
     <p>Alerta Hurto:<br>Placa ${esc(top.placa)}<br>${TIPO_TXT[top.tipo]} ${esc((top.ref || top.marca).toUpperCase())}<br>Color ${esc(colorDe(top.color).n.toLowerCase())}${rg === 'alto' ? ' · Zona de alto riesgo' : ''}</p>
     <p class="loc">Localidad: ${esc(l.nombre.toLowerCase())} · ${horaTxt(top.t).toLowerCase()}</p>
     <button class="btn-pill" data-verrep="${top.id}">Ver en el mapa</button>`;
+  }
   alertasCache = listaAlertas();
   const vis = alertasCache.slice(0, 8);
   $('#lista-alertas').innerHTML = vis.length ? vis.map(a => `
@@ -1510,6 +1587,15 @@ function pintarActualizado() {
 }
 $('#btn-actualizar').addEventListener('click', () => {
   const b = $('#btn-actualizar'); b.textContent = 'Actualizando…'; b.disabled = true;
+  if (NUBE && !S.demo) {
+    const antes = REMOTOS.length;
+    (miUid ? cargarRemotos() : conectarNube()).then(() => {
+      const n = REMOTOS.length - antes;
+      vistoAntes = S.vistoHasta; $('#alertas-scroll').scrollTop = 0;
+      toast(nubeError ? 'Sin conexión: revisa tu internet' : n > 0 ? `${plural(n, 'reporte nuevo', 'reportes nuevos')}` : 'Estás al día: no hay alertas nuevas', 1800);
+    }).catch(() => toast('Sin conexión: revisa tu internet')).finally(() => { b.textContent = 'Actualizar'; b.disabled = false; });
+    return;
+  }
   setTimeout(() => {
     b.textContent = 'Actualizar'; b.disabled = false;
     const llego = Math.random() < .6 && nuevoReporteVivo(false);
@@ -1560,6 +1646,7 @@ function enlazarUtil(body, id) {
 /* Simulación: la comunidad reporta hurtos nuevos mientras la app está abierta */
 const rnd = a => a[Math.floor(Math.random() * a.length)];
 function nuevoReporteVivo(avisar = true) {
+  if (!demoActivo()) return false;
   if (!S.sesion) return false;
   const pesos = LOCALIDADES.flatMap(l => Array(Math.max(1, Math.round(l.peso / 4))).fill(l));
   const loc = rnd(pesos), tipo = Math.random() < .56 ? 'moto' : 'auto';
@@ -1602,7 +1689,7 @@ function pintarHistorial() {
   $$('[data-htipo]').forEach(b => b.setAttribute('aria-pressed', b.dataset.htipo === H.tipo));
   const desde = H.periodo === 'hoy' ? VENTANAS.hoy.desde() : H.periodo === 'semana' ? VENTANAS.semana.desde() : 0;
   const q = norm(H.q.trim());
-  const base = H.vista === 'mios' ? S.misReportes.map(r => ({ ...r, mio: true })) : [...S.vivos, ...COMUNIDAD, ...S.misReportes.map(r => ({ ...r, mio: true }))];
+  const base = H.vista === 'mios' ? misReps() : todosReportes();
   const lista = base.filter(r => r.t >= desde && (H.tipo === 'todos' || r.tipo === H.tipo) &&
     (!q || norm(`${r.placa} ${r.marca} ${r.ref || ''} ${locPorId(r.loc).nombre} ${colorDe(r.color).n}`).includes(q))).sort((a, b) => b.t - a.t);
   const motos = lista.filter(r => r.tipo === 'moto').length, rec = lista.filter(r => r.estado === 'recuperado').length;
@@ -1656,6 +1743,7 @@ function detalleReporte(id) {
       <div><dt>Cómo ocurrió</dt><dd>${esc(MODOS[r.modo] || '—')}</dd></div>
       <div><dt>Lugar</dt><dd>${esc(l.nombre)}${r.lugar ? `<br><small style="font-weight:500">${esc(r.lugar)}</small>` : ''}</dd></div>
       <div><dt>Fecha y hora</dt><dd>${horaTxt(r.t, false)}</dd></div>
+      ${r.nube && !r.mio ? `<div><dt>Reportado por</dt><dd>${r.autorNombre ? esc(r.autorNombre) : 'Anónimo'}</dd></div>` : ''}
       <div><dt>Estado</dt><dd><span class="pill ${est[1] === 'alto' ? 'alto' : 'bajo'}">${est[0]}</span>${r.recuperado ? `<br><small style="font-weight:500">desde ${horaTxt(r.recuperado, false)}</small>` : ''}</dd></div>
       ${r.mio && r.editado ? `<div><dt>Editado</dt><dd>${horaTxt(r.editado)}</dd></div>` : ''}
       ${vistos ? `<div><dt>Avistamientos</dt><dd>${vistos}</dd></div>` : ''}
@@ -1669,7 +1757,7 @@ function detalleReporte(id) {
       </div>` : `
       <p style="margin-top:12px">¿Viste este vehículo? No te acerques: llama al <b>123</b> e indica la placa.</p>
       <div class="stack"><button class="btn-negro" id="dr-mapa">Ver en el mapa</button><button class="btn-gris" id="dr-visto">Lo vi</button>${botonUtil(r.id)}</div>
-      <p class="demo-note" style="margin-top:10px">Reporte de ejemplo de la comunidad.</p>`}`);
+      ${r.nube ? '' : '<p class="demo-note" style="margin-top:10px">Reporte de ejemplo de la comunidad.</p>'}`}`);
   body.addEventListener('click', e => { const f = e.target.closest('[data-foto]'); if (f) verFoto(r.fotos[+f.dataset.foto]); });
   $('#dr-mapa', body).onclick = () => verReporteEnMapa(r.id);
   enlazarUtil(body, r.id);
@@ -1678,7 +1766,15 @@ function detalleReporte(id) {
     return;
   }
   $('#dr-editar', body).onclick = () => { editarPendiente = r.id; ir('reporte', { forzar: true }); };
-  $('#dr-estado', body).onclick = () => {
+  $('#dr-estado', body).onclick = async () => {
+    if (NUBE) {
+      const estado = r.estado === 'recuperado' ? 'activo' : 'recuperado';
+      const { data, error } = await sb.from('reportes').update({ estado, recuperado: estado === 'recuperado' ? new Date().toISOString() : null }).eq('id', r.id).select().single();
+      if (error) { toast('No se pudo actualizar. Revisa tu conexión.'); return; }
+      ponerRemoto(deFila(data));
+      toast(estado === 'recuperado' ? '¡Qué bien! Reporte marcado como recuperado' : 'Reporte activo de nuevo');
+      detalleReporte(r.id); pintarActual(); return;
+    }
     const m = S.misReportes.find(x => x.id === r.id);
     m.estado = m.estado === 'recuperado' ? 'activo' : 'recuperado';
     m.recuperado = m.estado === 'recuperado' ? Date.now() : null; guardar();
@@ -1689,7 +1785,14 @@ function detalleReporte(id) {
     $('#acciones-mias', body).innerHTML = `<p><b>¿Eliminar este reporte?</b> Deja de aparecer en el Mapa y en Alertas. No se puede deshacer.</p>
       <div class="dos-col"><button class="btn-gris" id="dr-no">Cancelar</button><button class="btn-rojo" id="dr-si">Eliminar</button></div>`;
     $('#dr-no', body).onclick = () => detalleReporte(r.id);
-    $('#dr-si', body).onclick = () => { S.misReportes = S.misReportes.filter(x => x.id !== r.id); guardar(); cerrarCapas(); pintarActual(); toast('Reporte eliminado'); };
+    $('#dr-si', body).onclick = async () => {
+      if (NUBE) {
+        const { error } = await sb.from('reportes').delete().eq('id', r.id);
+        if (error) { toast('No se pudo eliminar. Revisa tu conexión.'); return; }
+        REMOTOS = REMOTOS.filter(x => x.id !== r.id);
+      } else { S.misReportes = S.misReportes.filter(x => x.id !== r.id); guardar(); }
+      cerrarCapas(); pintarActual(); toast('Reporte eliminado');
+    };
   };
 }
 function verReporteEnMapa(id) {
@@ -1705,7 +1808,7 @@ function verReporteEnMapa(id) {
 /* ================= Perfil ================= */
 function pintarPerfil() {
   pintarNombre();
-  const envs = S.misReportes.length;
+  const envs = misReps().length;
   $('#st-reportes').textContent = envs;
   $('#st-utiles').textContent = S.utiles.length;
   $('#st-meses').textContent = Math.max(1, Math.round((Date.now() - S.creado) / (30 * DIA)));
@@ -1914,10 +2017,13 @@ const HOJAS = {
         <button data-sheet="vehiculos"><span>Vehículos registrados<small>${plural(S.vehiculos.length, 'vehículo', 'vehículos')}</small></span><img src="images/back-177.svg" alt=""></button>
         <button data-sheet="config-alertas"><span>Configuración de alertas</span><img src="images/back-177.svg" alt=""></button>
         <button data-sheet="privacidad"><span>Privacidad y datos</span><img src="images/back-177.svg" alt=""></button>
-        <div><span>Versión<small>Prototipo 2.0 · Principios de Ingeniería</small></span></div>
+        <div><span>Reportes compartidos<small>${!NUBE ? 'Modo local: cada navegador guarda solo sus reportes' : nubeError ? 'Sin conexión con la base de datos' : miUid ? `Conectado · ${plural(REMOTOS.length, 'reporte', 'reportes')} de la comunidad` : 'Conectando…'}</small></span><span class="pill ${!NUBE ? 'neutro' : nubeError ? 'alto' : 'bajo'}">${!NUBE ? 'Local' : nubeError ? 'Error' : 'En línea'}</span></div>
+        <div><span>Versión<small>Prototipo 3.0 · Principios de Ingeniería</small></span></div>
       </div>
-      <div class="stack" style="margin-top:14px"><button class="btn-gris peligro" id="aj-salir">Cerrar sesión</button></div>`);
+      ${NUBE ? switchRow('aj-demo', 'Mostrar reportes de ejemplo', 'Mezcla datos inventados con los reales (solo para demostraciones)', S.demo) : ''}
+      <div class="stack" style="margin-top:14px"><button class="btn-gris peligro" id="aj-salir">Cerrar sesión</button></div>`, { alCerrar: () => pintarActual() });
     $('#aj-salir', body).onclick = () => $('#btn-salir').click();
+    body.addEventListener('change', e => { if (e.target.id === 'aj-demo') { S.demo = e.target.checked; guardar(); toast(S.demo ? 'Reportes de ejemplo visibles' : 'Solo reportes reales'); } });
   },
 };
 
@@ -2013,7 +2119,7 @@ function iniciarReporte() {
   $('#rep-anonimo').checked = S.privacidad.anonimo; $('#rep-veraz').checked = false;
   $('#banner-borrador').hidden = true;
   if (editarPendiente) {
-    const r = S.misReportes.find(x => x.id === editarPendiente); editarPendiente = null;
+    const r = misReps().find(x => x.id === editarPendiente); editarPendiente = null;
     if (r) Object.assign(rep, JSON.parse(JSON.stringify(r)), { pos: { x: r.x, y: r.y }, fecha: fechaISO(r.t), hora: horaISO(r.t), editId: r.id, fotos: [...(r.fotos || [])] });
     $('#rep-anonimo').checked = !!r?.anonimo;
   } else if (vehPendiente) {
@@ -2142,12 +2248,34 @@ $('#rep-next').addEventListener('click', () => {
   if (paso === 1) { if (validarPaso1()) { paso = 2; mostrarPaso(); } return; }
   if (paso === 2) { if (validarPaso2()) { paso = 3; mostrarPaso(); } return; }
   if (!$('#rep-veraz').checked) { $('#err-veraz').textContent = 'Confirma que la información es verdadera'; return; }
-  const datos = { tipo: rep.tipo, marca: rep.marca, modelo: rep.modelo, placa: rep.placa, color: rep.color, fotos: rep.fotos, senas: rep.senas, modo: rep.modo, lugar: rep.lugar, loc: rep.loc, x: rep.pos.x, y: rep.pos.y, t: rep.t, anonimo: $('#rep-anonimo').checked };
+  const datos = { tipo: rep.tipo, marca: rep.marca, ref: rep.ref, modelo: rep.modelo, placa: rep.placa, color: rep.color, fotos: rep.fotos, senas: rep.senas, modo: rep.modo, lugar: rep.lugar, loc: rep.loc, x: rep.pos.x, y: rep.pos.y, t: rep.t, anonimo: $('#rep-anonimo').checked };
+  if (NUBE) { enviarNube(datos); return; }
   const copia = JSON.parse(JSON.stringify(S.misReportes)), borr = S.borrador;
   let id;
   if (rep.editId) { const r = S.misReportes.find(x => x.id === rep.editId); Object.assign(r, datos, { editado: Date.now(), ejemplo: false }); id = r.id; }
   else { id = 'r' + Date.now(); S.misReportes.unshift({ id, ...datos, estado: 'activo', creado: Date.now() }); S.borrador = null; }
   if (!guardar()) { S.misReportes = copia; S.borrador = borr; return; }
+  trasGuardar(id, datos);
+});
+async function enviarNube(datos) {
+  if (!miUid) { toast(nubeError ? 'Sin conexión con la base de datos. Revisa tu internet y vuelve a abrir la app.' : 'Conectando… intenta de nuevo en un momento.', 3500); return; }
+  const b = $('#rep-next'), txt = $('#rep-next-txt').textContent;
+  b.disabled = true; $('#rep-next-txt').textContent = 'Enviando…';
+  try {
+    const q = rep.editId
+      ? sb.from('reportes').update({ ...aFila(datos), editado: new Date().toISOString() }).eq('id', rep.editId)
+      : sb.from('reportes').insert(aFila(datos));
+    const { data, error } = await q.select().single();
+    if (error) throw error;
+    ponerRemoto(deFila(data));
+    if (!rep.editId) { S.borrador = null; guardar(); }
+    trasGuardar(data.id, datos);
+  } catch (e) {
+    console.error('Supabase:', e);
+    toast('No se pudo enviar. Revisa tu conexión e inténtalo de nuevo: tus datos siguen aquí.', 4000);
+  } finally { b.disabled = false; $('#rep-next-txt').textContent = txt; }
+}
+function trasGuardar(id, datos) {
   enviado = true;
   if (rep.editId) { toast('Cambios guardados'); historial = historial.filter(h => h !== 'reporte'); ir('historial', { atras: true }); H.vista = 'mios'; pintarHistorial(); detalleReporte(id); return; }
   ultimoNuevo = id;
@@ -2159,12 +2287,13 @@ $('#rep-next').addEventListener('click', () => {
   $('#ok-hist', body).onclick = () => abrirHistorial('mios');
   $('#ok-inicio', body).onclick = () => ir('inicio');
   historial = historial.filter(h => h !== 'reporte');
-});
+}
 $('#rep-back').addEventListener('click', () => { if (paso > 1) { leerCampos(); paso--; mostrarPaso(); return; } volver(); });
 
 /* ================= Arranque ================= */
 aplicarTema();
 pintarNombre();
 ajustar();
+conectarNube();
 })();
 </script>
