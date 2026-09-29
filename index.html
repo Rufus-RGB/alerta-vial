@@ -2023,7 +2023,7 @@ const HOJAS = {
       ${NUBE ? switchRow('aj-demo', 'Mostrar reportes de ejemplo', 'Mezcla datos inventados con los reales (solo para demostraciones)', S.demo) : ''}
       <div class="stack" style="margin-top:14px"><button class="btn-gris peligro" id="aj-salir">Cerrar sesión</button></div>`, { alCerrar: () => pintarActual() });
     $('#aj-salir', body).onclick = () => $('#btn-salir').click();
-    body.addEventListener('change', e => { if (e.target.id === 'aj-demo') { S.demo = e.target.checked; guardar(); toast(S.demo ? 'Reportes de ejemplo visibles' : 'Solo reportes reales'); } });
+    body.addEventListener('change', e => { if (e.target.id === 'aj-demo') { S.demo = e.target.checked; guardar(); toast(S.demo ? 'Reportes de ejemplo visibles' : 'Solo reportes reales'); pintarActual(); } });
   },
 };
 
