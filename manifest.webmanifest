@@ -1,0 +1,13 @@
+{
+  "name": "Alerta Vial",
+  "short_name": "Alerta Vial",
+  "description": "Reporta hurtos de carros y motos en Bogotá y consulta las zonas de riesgo.",
+  "lang": "es-CO",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2B705",
+  "theme_color": "#F2B705",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
